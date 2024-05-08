@@ -10,6 +10,19 @@ using static Program;
 
 public static class VectorExtesions
 {
+    public static void Write(this Vector4 vec, BinaryWriter bw)
+    {
+        bw.Write(vec.X);
+        bw.Write(vec.Y);
+        bw.Write(vec.Z);
+        bw.Write(vec.W);
+    }
+
+    public static Vector4 ReadVector4(this BinaryReader br)
+    {
+        return new Vector4(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+    }
+
     public static void Write(this Vector3 vec, BinaryWriter bw)
     {
         bw.Write(vec.X);
@@ -166,14 +179,14 @@ class TSModelSubObject
 class TSModelLod
 {
     public float Distance;
+    public float SphereRadius;
     public TSModelSubObject[] SubObjects;
     public int[] Hierarchy;
 
     public void Write(BinaryWriter bw)
     {
         bw.Write(Distance);
-
-        Console.WriteLine("SubObjects.Length: " + SubObjects.Length);
+        bw.Write(SphereRadius);
 
         bw.Write(SubObjects.Length);
         foreach (var subObject in SubObjects)
@@ -189,6 +202,7 @@ class TSModelLod
         var lod = new TSModelLod();
 
         lod.Distance = br.ReadSingle();
+        lod.SphereRadius = br.ReadSingle();
 
         lod.SubObjects = new TSModelSubObject[br.ReadInt32()];
         for (var iSubObj = 0; iSubObj < lod.SubObjects.Length; iSubObj++)
@@ -202,14 +216,262 @@ class TSModelLod
     }
 }
 
-class TSModel
+#region Animations
+
+enum TSControllerType
 {
-    public TSModelLod[] Lods;
-    public Matrix4[] Matrices;
-    public string[] MatricesName;
+    LINEAR_POS,
+    TCB_ROT,
+}
+
+enum TSKeyPositionType
+{
+    LINEAR_POS,
+    SLERP_ROT,
+    TCB_KEY,
+}
+
+abstract class TSController
+{
+    public abstract TSControllerType GetControllerType();
+
+    public TSKeyPosition[] KeyPositions;
+
+    public virtual void Write(BinaryWriter bw)
+    {
+        bw.Write((byte)GetControllerType());
+
+        bw.Write(KeyPositions.Length);
+        foreach (var position in KeyPositions)
+            if (position != null) position.Write(bw);
+    }
+
+    public abstract void Read(BinaryReader br);
+}
+
+abstract class TSKeyPosition
+{
+    public int Frame;
+    public abstract TSKeyPositionType GetKeyPositionType();
+
+    public virtual void Write(BinaryWriter bw)
+    {
+        bw.Write(Frame);
+        bw.Write((byte)GetKeyPositionType());
+    }
+
+    public abstract bool KeyEqual(TSKeyPosition other);
+}
+
+class TSLinearKey : TSKeyPosition
+{
+    public Vector3 Position;
+
+    public override TSKeyPositionType GetKeyPositionType() => TSKeyPositionType.LINEAR_POS;
+
+    public override bool KeyEqual(TSKeyPosition other)
+    {
+        if (((TSLinearKey)other).Position == Position) return true;
+
+        return false;
+    }
+
+    public override void Write(BinaryWriter bw)
+    {
+        base.Write(bw);
+        Position.Write(bw);
+    }
+}
+
+class TSLinearPosController : TSController
+{
+    public override TSControllerType GetControllerType() => TSControllerType.LINEAR_POS;
+
+    public override void Read(BinaryReader br)
+    {
+        KeyPositions = new TSKeyPosition[br.ReadInt32()];
+
+        for (int iKeys = 0; iKeys < KeyPositions.Length; iKeys++)
+        {
+            var frame = br.ReadInt32();
+            var type = (TSKeyPositionType)br.ReadByte();
+
+            if (type == TSKeyPositionType.LINEAR_POS)
+            {
+                var key = new TSLinearKey();
+                key.Frame = frame;
+                key.Position = br.ReadVector3();
+                KeyPositions[iKeys] = key;
+            }
+        }
+    }
+}
+
+class TSSlerpRotationKey : TSKeyPosition
+{
+    public Vector4 XYZW;
+
+    public override TSKeyPositionType GetKeyPositionType() => TSKeyPositionType.SLERP_ROT;
+
+    public override bool KeyEqual(TSKeyPosition other)
+    {
+        if (((TSSlerpRotationKey)other).XYZW == XYZW) return true;
+
+        return false;
+    }
+
+    public override void Write(BinaryWriter bw)
+    {
+        base.Write(bw);
+
+        XYZW.Write(bw);
+    }
+}
+
+class TSTCBRotationKey : TSKeyPosition
+{
+    public Vector4 XYZW;
+
+    public float Tension, Continuity, Bias, In, Out;
+
+    public override TSKeyPositionType GetKeyPositionType() => TSKeyPositionType.TCB_KEY;
+
+    public override bool KeyEqual(TSKeyPosition other)
+    {
+        if (((TSTCBRotationKey)other).XYZW == XYZW) return true;
+
+        return false;
+    }
+
+    public override void Write(BinaryWriter bw)
+    {
+        base.Write(bw);
+
+        XYZW.Write(bw);
+    }
+}
+
+class TSTCBRotationController : TSController
+{
+    public override TSControllerType GetControllerType() => TSControllerType.TCB_ROT;
+
+    public override void Read(BinaryReader br)
+    {
+        KeyPositions = new TSKeyPosition[br.ReadInt32()];
+
+        for (int iKeys = 0; iKeys < KeyPositions.Length; iKeys++)
+        {
+            var frame = br.ReadInt32();
+            var type = (TSKeyPositionType)br.ReadByte();
+
+            if (type == TSKeyPositionType.SLERP_ROT)
+            {
+                var key = new TSSlerpRotationKey();
+                key.Frame = frame;
+                key.XYZW = br.ReadVector4();
+                KeyPositions[iKeys] = key;
+            }
+            else if (type == TSKeyPositionType.TCB_KEY)
+            {
+                var key = new TSTCBRotationKey();
+                key.Frame = frame;
+                key.XYZW = br.ReadVector4();
+                KeyPositions[iKeys] = key;
+            }
+        }
+    }
+}
+
+class TSAnimNode
+{
+    public string Name;
+    public TSController[] Controllers;
 
     public void Write(BinaryWriter bw)
     {
+        bw.WriteString(Name);
+
+        bw.Write(Controllers.Length);
+        foreach (var controller in Controllers)
+            controller.Write(bw);
+    }
+
+    public static TSAnimNode Read(BinaryReader br)
+    {
+        var node = new TSAnimNode();
+
+        node.Name = br.ReadStringLen();
+
+        node.Controllers = new TSController[br.ReadInt32()];
+        for (int iCont = 0; iCont < node.Controllers.Length; iCont++)
+        {
+            var type = (TSControllerType)br.ReadByte();
+
+            TSController controller;
+
+            if (type == TSControllerType.LINEAR_POS)
+            {
+                controller = new TSLinearPosController();
+                controller.Read(br);
+                node.Controllers[iCont] = controller;
+            }
+            else if (type == TSControllerType.TCB_ROT)
+            {
+                controller = new TSTCBRotationController();
+                controller.Read(br);
+                node.Controllers[iCont] = controller;
+            }
+        }
+
+        return node;
+    }
+}
+
+class TSAnimation
+{
+    public int FrameCount;
+    public int FrameRate;
+    public TSAnimNode[] AnimNodes;
+
+    public void Write(BinaryWriter bw)
+    {
+        bw.Write(FrameCount);
+        bw.Write(FrameRate);
+
+        bw.Write(AnimNodes.Length);
+        foreach (var node in AnimNodes)
+            node.Write(bw);
+    }
+
+    public static TSAnimation Read(BinaryReader br)
+    {
+        var anim = new TSAnimation();
+
+        anim.FrameCount = br.ReadInt32();
+        anim.FrameRate = br.ReadInt32();
+
+        anim.AnimNodes = new TSAnimNode[br.ReadInt32()];
+        for (int iNodes = 0; iNodes < anim.AnimNodes.Length; iNodes++)
+            anim.AnimNodes[iNodes] = TSAnimNode.Read(br);
+
+        return anim;
+    }
+}
+
+#endregion
+
+class TSModel
+{
+    public int Version;
+    public TSModelLod[] Lods;
+    public Matrix4[] Matrices;
+    public string[] MatricesName;
+    public TSAnimation[] Animations;
+
+    public void Write(BinaryWriter bw)
+    {
+        bw.Write(Version);
+
         bw.Write(Matrices.Length);
         foreach (var matrix in Matrices)
             matrix.Write(bw);
@@ -220,11 +482,17 @@ class TSModel
         bw.Write(Lods.Length);
         foreach (var lod in Lods)
             lod.Write(bw);
+
+        bw.Write(Animations.Length);
+        foreach (var anim in Animations)
+            anim.Write(bw);
     }
 
     public static TSModel Read(BinaryReader br)
     {
         var model = new TSModel();
+
+        model.Version = br.ReadInt32();
 
         var numMatrix = br.ReadInt32();
 
@@ -240,6 +508,10 @@ class TSModel
         model.Lods = new TSModelLod[br.ReadInt32()];
         for (int iLod = 0; iLod < model.Lods.Length; iLod++)
             model.Lods[iLod] = TSModelLod.Read(br);
+
+        model.Animations = new TSAnimation[br.ReadInt32()];
+        for (int iAnim = 0; iAnim < model.Animations.Length; iAnim++)
+            model.Animations[iAnim] = TSAnimation.Read(br);
 
         return model;
     }
@@ -285,6 +557,8 @@ public enum FindFileFrom
     FromGlobal,
     FromRoute,
     FromTrain,
+
+    Unknown,
 }
 
 public enum FileType
@@ -347,9 +621,15 @@ public static class Extensions
         return shape.images.ToArray();
     }
 
+    public static void WriteLine(string str)
+    {
+        if (!QuietMode)
+            Console.WriteLine(str);
+    }
+
     public static FileType GetFileType(string filename)
     {
-        var ext = Path.GetExtension(filename);
+        var ext = Path.GetExtension(filename.ToLower());
 
         switch (ext)
         {
@@ -402,21 +682,34 @@ public static class Extensions
         return null;
     }
 
-    public static string? FindFile(string filename, string rootpath, string mstspath, FindFileFrom from)
+    public static string? FindFile(string filename, string rootpath, string mstspath, FindFileFrom from, out FindFileFrom founded_location)
     {
         string? path = null;
+
+        founded_location = FindFileFrom.Unknown;
 
         if (from == FindFileFrom.FromRoute)
         {
             path = GetFilepath(filename, rootpath, mstspath, FindFileFrom.FromRoute);
+            founded_location = FindFileFrom.FromRoute;
 
             if (!File.Exists(path))
+            {
                 path = GetFilepath(filename, rootpath, mstspath, FindFileFrom.FromGlobal);
+                founded_location = FindFileFrom.FromGlobal;
+            }
+        }
+
+        if (from == FindFileFrom.FromGlobal)
+        {
+            path = GetFilepath(filename, rootpath, mstspath, FindFileFrom.FromGlobal);
+            founded_location = FindFileFrom.FromGlobal;
         }
 
         if (from == FindFileFrom.FromTrain)
         {
             path = GetFilepath(filename, rootpath, mstspath, FindFileFrom.FromTrain);
+            founded_location = FindFileFrom.FromTrain;
         }
 
         return path;
@@ -460,15 +753,15 @@ public static class TextureManager
 
         if (!File.Exists(input))
         {
-            Console.WriteLine("Texture " + input + " not found!");
+            Extensions.WriteLine("Texture " + input + " not found!");
             return;
         }
 
         if (output == null) output = Path.ChangeExtension(input, ".ts_tex");
 
-        Console.WriteLine("Texture: ");
-        Console.WriteLine("\t" + input);
-        Console.WriteLine("\t" + output);
+        Extensions.WriteLine("Texture: ");
+        Extensions.WriteLine("\t" + input);
+        Extensions.WriteLine("\t" + output);
 
         var stopwatch = new Stopwatch();
 
@@ -490,7 +783,7 @@ public static class TextureManager
         }
         stopwatch.Stop();
 
-        Console.WriteLine("\t" + $"Texture converted in {stopwatch.Elapsed.TotalSeconds} sec\n");
+        Extensions.WriteLine("\t" + $"Texture converted in {stopwatch.Elapsed.TotalSeconds} sec\n");
     }
 
     public static void ShowInfoTexture(string input, Options options)
@@ -552,15 +845,17 @@ public static class TextureManager
 
 public static class ShapeManager
 {
+    public const int TS_MODEL_VERSION = 1;
+
     public static void ConvertShape(string input, string? output, Options options)
     {
         if (output == null) output = input;
 
         output = Path.ChangeExtension(output, ".ts_model");
 
-        Console.WriteLine("Shape: ");
-        Console.WriteLine("\t" + input);
-        Console.WriteLine("\t" + output);
+        Extensions.WriteLine("Shape: ");
+        Extensions.WriteLine("\t" + input);
+        Extensions.WriteLine("\t" + output);
 
         var stopwatch = new Stopwatch();
 
@@ -582,7 +877,7 @@ public static class ShapeManager
         }
         stopwatch.Stop();
 
-        Console.WriteLine("\t" + $"Shape converted in {stopwatch.Elapsed.TotalSeconds} sec\n");
+        Extensions.WriteLine("\t" + $"Shape converted in {stopwatch.Elapsed.TotalSeconds} sec\n");
     }
 
     public static void ConvertShapeTextures(string input_shape, string? output_texture_folder, string? root_path, string? msts_path, FindFileFrom from, Options options)
@@ -612,19 +907,19 @@ public static class ShapeManager
         foreach (var image in shape.images)
         {
             var output_path = Path.Combine(output_texture_folder, image);
-            var input_path = Extensions.FindFile(image, root_path, msts_path, from);
+            var input_path = Extensions.FindFile(image, root_path, msts_path, from, out var founded_location);
+
+            if (disable_double_dot)
+                output_path = output_path.Replace("../", "");
 
             output_path = Path.ChangeExtension(output_path, "ts_tex");
 
             Directory.CreateDirectory(Path.GetDirectoryName(output_path));
 
-            if (disable_double_dot)
-                output_path = output_path.Replace("../", "");
-
             //File.WriteAllText(output_path, "123");
             TextureManager.ConvertTexture(input_path, output_path, options);
 
-            Console.WriteLine(output_path);
+            Extensions.WriteLine(output_path);
         }
     }
 
@@ -637,7 +932,7 @@ public static class ShapeManager
         var images_count = shape.images.Count;
         var matrices_count = shape.matrices.Count;
 
-        Console.WriteLine("");
+        Extensions.WriteLine("");
 
         Console.WriteLine($"Shape: {input}\n");
 
@@ -656,6 +951,25 @@ public static class ShapeManager
         foreach (var matrix in shape.matrices)
         {
             Console.WriteLine($"\tMatrix - {matrix.Name}");
+        }
+
+        Console.WriteLine("\nAnimations:");
+        foreach (var animation in shape.animations)
+        {
+            foreach (var node in animation.anim_nodes)
+            {
+                Console.WriteLine($"\tAnim Node ({node.Name}) | FrameRate: {animation.FrameRate}");
+                
+                foreach (var controller in node.controllers)
+                {
+                    Console.WriteLine($"\t\tController {controller.GetType().Name}");
+                    
+                    foreach (var key in controller)
+                    {
+                        Console.WriteLine($"\t\t\tKey {key.GetType().Name} | Frame: {key.Frame}");
+                    }
+                }
+            }
         }
     }
 
@@ -678,6 +992,7 @@ public static class ShapeManager
                 foreach (var lod in model.Lods)
                 {
                     Console.WriteLine($"\tLod ({lod.Distance})");
+                    Console.WriteLine($"\tLod Sphere Radius ${lod.SphereRadius}");
 
                     foreach (var subobject in lod.SubObjects)
                     {
@@ -689,6 +1004,26 @@ public static class ShapeManager
 
                             Console.WriteLine($"\t\t\t\tTexture: {primitive.Texture}");
                             Console.WriteLine($"\t\t\t\tMaterial Name: {primitive.MaterialName}");
+                        }
+                    }
+                }
+
+                Console.WriteLine("Animations:");
+
+                foreach (var anim in model.Animations)
+                {
+                    foreach (var node in anim.AnimNodes)
+                    {
+                        Console.WriteLine($"\tNode: {node.Name}");
+
+                        foreach (var controller in node.Controllers)
+                        {
+                            Console.WriteLine($"\t\tController: {controller.GetType().Name}");
+
+                            foreach (var key in controller.KeyPositions)
+                            {
+                                Console.WriteLine($"\t\t\tKey: {key.GetType().Name} | Frame: {key.Frame}");
+                            }
                         }
                     }
                 }
@@ -704,6 +1039,7 @@ public static class ShapeManager
 
         var shapeid = new Random().Next(9999);
 
+        model.Version = TS_MODEL_VERSION;
         model.Matrices = new Matrix4[shape.matrices.Count];
         model.MatricesName = new string[shape.matrices.Count];
 
@@ -724,9 +1060,17 @@ public static class ShapeManager
             {
                 var dist = distance_level.distance_level_header.dlevel_selection;
 
-                var shapeLod = new TSModelLod { Distance = dist, Hierarchy = distance_level.distance_level_header.hierarchy };
+                var shapeLod = new TSModelLod
+                {
+                    Distance = dist,
+                    Hierarchy = distance_level.distance_level_header.hierarchy,
+                    SubObjects = new TSModelSubObject[distance_level.sub_objects.Count]
+                };
 
-                shapeLod.SubObjects = new TSModelSubObject[distance_level.sub_objects.Count];
+                if (shape.volumes.Count > 0)
+                    shapeLod.SphereRadius = shape.volumes[0].Radius;
+                else
+                    shapeLod.SphereRadius = 100;
 
                 var iSubObject = 0;
 
@@ -742,7 +1086,11 @@ public static class ShapeManager
                     {
                         var point = shape.points[vertex.ipoint];
                         var normal = shape.normals[vertex.inormal];
-                        var uv = shape.uv_points[vertex.vertex_uvs[0]];
+
+                        uv_point uv = new uv_point(0, 0);
+
+                        if (vertex.vertex_uvs.Length > 0)
+                            uv = shape.uv_points[vertex.vertex_uvs[0]];
 
                         var vert = new Vertex
                         {
@@ -792,7 +1140,10 @@ public static class ShapeManager
                         if (12 + vtx_state.LightMatIdx >= 0 && 12 + vtx_state.LightMatIdx < Extensions.VertexLightModeMap.Length)
                             options |= Extensions.VertexLightModeMap[12 + vtx_state.LightMatIdx];
 
-                        var image = shape.images[shape.textures[prim_state.tex_idxs[0]].iImage];
+                        var image = "";
+
+                        if (prim_state.tex_idxs.Length > 0)
+                            image = shape.images[shape.textures[prim_state.tex_idxs[0]].iImage];
 
                         image = Path.ChangeExtension(image, "ts_tex");
 
@@ -816,6 +1167,135 @@ public static class ShapeManager
                 model.Lods[iLod] = shapeLod;
 
                 iLod++;
+            }
+        }
+
+        model.Animations = new TSAnimation[shape.animations.Count];
+
+        int iAnim = 0;
+        foreach (var animation in shape.animations)
+        {
+            var ts_anim = new TSAnimation();
+
+            ts_anim.FrameCount = animation.FrameCount;
+            ts_anim.FrameRate = animation.FrameRate;
+
+            ts_anim.AnimNodes = new TSAnimNode[animation.anim_nodes.Count];
+
+            model.Animations[iAnim] = ts_anim;
+
+            int iNode = 0;
+            foreach (var node in animation.anim_nodes)
+            {
+                var ts_node = new TSAnimNode();
+
+                ts_node.Name = node.Name;
+                ts_node.Controllers = new TSController[node.controllers.Count];
+
+                ts_anim.AnimNodes[iNode] = ts_node;
+
+                int iCont = 0;
+                foreach (var controller in node.controllers)
+                {
+                    var type = controller.GetType();
+
+                    TSController ts_controller = new TSLinearPosController();
+                    
+                    if (type == typeof(tcb_rot))
+                        ts_controller = new TSTCBRotationController();
+                    else if (type == typeof(linear_pos))
+                        ts_controller = new TSLinearPosController();
+
+                    ts_controller.KeyPositions = new TSKeyPosition[controller.Count];
+
+                    ts_node.Controllers[iCont] = ts_controller;
+
+                    int iKey = 0;
+                    foreach (var key in controller)
+                    {
+                        var type_key = key.GetType();
+
+                        if (type_key == typeof(slerp_rot))
+                        {
+                            slerp_rot slerp_key = (slerp_rot)key;
+
+                            var ts_key = new TSSlerpRotationKey();
+                            ts_key.Frame = key.Frame;
+                            ts_key.XYZW = new Vector4(slerp_key.X, slerp_key.Y, slerp_key.Z, slerp_key.W);
+
+                            ts_controller.KeyPositions[iKey] = ts_key;
+                        }
+                        else if (type_key == typeof(tcb_key))
+                        {
+                            tcb_key tcb_key = (tcb_key)key;
+
+                            var ts_key = new TSTCBRotationKey();
+                            ts_key.Frame = key.Frame;
+                            ts_key.XYZW = new Vector4(tcb_key.X, tcb_key.Y, tcb_key.Z, tcb_key.W);
+
+                            ts_controller.KeyPositions[iKey] = ts_key;
+                        }
+                        else if (type_key == typeof(linear_key))
+                        {
+                            linear_key linear_key = (linear_key)key;
+
+                            var ts_key = new TSLinearKey();
+                            ts_key.Frame = key.Frame;
+                            ts_key.Position = new Vector3(linear_key.X, linear_key.Y, linear_key.Z);
+
+                            ts_controller.KeyPositions[iKey] = ts_key;
+                        }
+
+                        iKey++;
+                    }
+
+                    iCont++;
+                }
+
+                iNode++;
+            }
+
+            iAnim++;
+        }
+
+
+        // optimization
+        foreach (var animation in model.Animations)
+        {
+            foreach (var node in animation.AnimNodes)
+            {
+                List<TSController> to_delete = [];
+
+
+                foreach (var controller in node.Controllers)
+                {
+                    var is_equal = true;
+
+                    foreach (var key in controller.KeyPositions)
+                        if (!controller.KeyPositions[0].KeyEqual(key)) is_equal = false;
+
+                    if (is_equal)
+                    {
+                        Console.WriteLine($"Optimized controller {node.Name} {controller.GetType().Name}");
+                        
+                        to_delete.Add(controller);
+                    }
+                }
+
+                List<TSController> new_array = [];
+
+                foreach (var controller in node.Controllers)
+                {
+                    var add = true;
+
+                    foreach (var to_del in to_delete)
+                        if (to_del == controller) add = false;
+
+                    if (add)
+                        new_array.Add(controller);
+                }
+
+                node.Controllers = new_array.ToArray();
             }
         }
 
@@ -874,6 +1354,8 @@ public static class RouteManager
 {
     public static void ConvertRoute(string folder, string mstspath, Options options)
     {
+        QuietMode = true;
+
         var output = folder + "_converted";
 
         Console.WriteLine($"Route Folder {folder}");
@@ -884,6 +1366,8 @@ public static class RouteManager
         Directory.CreateDirectory(Path.Combine(output, "world"));
         Directory.CreateDirectory(Path.Combine(output, "models"));
         Directory.CreateDirectory(Path.Combine(output, "textures"));
+        Directory.CreateDirectory(Path.Combine(output, "models_global"));
+        Directory.CreateDirectory(Path.Combine(output, "textures_global"));
 
         var wfiles = Directory.GetFiles(Path.Combine(folder, "WORLD"));
 
@@ -895,22 +1379,51 @@ public static class RouteManager
                 continue;
 
             var world = new WFile(Path.Combine(folder, wfile));
+
+            if (world.TileX == -2973 || world.TileX == -2972)
+            { }
+            else
+            { continue; }
+
+            if (world.TileZ != 15038) continue;
+
+            var tileX = world.TileX;
+            var tileZ = world.TileZ;
+
+            var wfilename = $"w{(tileX > 0 ? '+' : '-')}{Math.Abs(tileX)}{(tileZ > 0 ? '+' : '-')}{Math.Abs(tileZ)}.ts_world";
+
+            WorldManager.ConvertWorld(Path.Combine(folder, wfile), Path.Combine(output, "world", wfilename), options);
             
             foreach (var obj in world.Tr_Worldfile)
             {
-                if (obj is StaticObj)
+                if (obj is StaticObj || obj is TrackObj)
                 {
                     if (!alreadyConverted.TryGetValue(obj.FileName, out bool _))
                     {
-                        var filepath = Extensions.FindFile(obj.FileName, folder, mstspath, FindFileFrom.FromRoute);
+                        var filepath = Extensions.FindFile(obj.FileName, folder, mstspath, FindFileFrom.FromRoute, out var founded_location);
 
-                        var modelout = Path.Combine(output, "models", obj.FileName);
+                        Console.WriteLine($"\tConverting {founded_location} {obj.FileName}");
 
-                        ShapeManager.ConvertShape(filepath, modelout, options);
+                        if (founded_location == FindFileFrom.FromGlobal)
+                        {
+                            var modelout = Path.Combine(output, "models_global", obj.FileName);
 
-                        var textureout = Path.Combine(output, "textures");
+                            ShapeManager.ConvertShape(filepath, modelout, options);
 
-                        ShapeManager.ConvertShapeTextures(filepath, textureout, folder, mstspath, FindFileFrom.FromRoute, options);
+                            var textureout = Path.Combine(output, "textures_global");
+
+                            ShapeManager.ConvertShapeTextures(filepath, textureout, mstspath, mstspath, FindFileFrom.FromGlobal, options);
+                        }
+                        else if (founded_location == FindFileFrom.FromRoute)
+                        {
+                            var modelout = Path.Combine(output, "models", obj.FileName);
+
+                            ShapeManager.ConvertShape(filepath, modelout, options);
+
+                            var textureout = Path.Combine(output, "textures");
+
+                            ShapeManager.ConvertShapeTextures(filepath, textureout, folder, mstspath, FindFileFrom.FromRoute, options);
+                        }
 
                         alreadyConverted[obj.FileName] = true;
                     }
@@ -922,6 +1435,8 @@ public static class RouteManager
 
 public static class Program
 {
+    public static bool QuietMode = false;
+
     static void ConvertFile(string input, string? output, Options options)
     {
         var ext = Path.GetExtension(input);
@@ -948,6 +1463,7 @@ public static class Program
 
     static void ConvertFolder(string input, string? output, bool recursive, Options options)
     {
+
         input = Path.GetFullPath(input);
 
         var files = Directory.GetFiles(input);
@@ -1001,12 +1517,14 @@ public static class Program
     {
         var value = Parser.Default.ParseArguments<Options>(args).Value;
 
-        if (value == null) return;
+        if (value == null)
+        {
+            Console.WriteLine("Press key to continue");
+            Console.ReadKey();
+            return;
+        }
 
         var attr = File.GetAttributes(value.Input);
-
-        //Console.WriteLine("Press key to continue");
-        //Console.ReadKey();
 
         if (value.Route)
         {
@@ -1034,274 +1552,5 @@ public static class Program
             else
                 ConvertFile(value.Input, value.Output, value);
         }
-
-        /*
-        var convert = true;
-        var type = ConvertType.Texture;
-
-        if (convert)
-        {
-            if (type == ConvertType.Texture)
-            {
-
-                using (var stream = File.Open("converted_texture.ts_tex", FileMode.Create))
-                {
-                    using (var writer = new BinaryWriter(stream))
-                    {
-                        //var path = "M:/Games/gorails/ROUTES/TestRoute_RTS/load.ace";
-                        var path = @"M:\Games\gorails\UTILS\AceIt\test_one_alpha.ace";
-                        var data = AceFile.LoadTextureDataFromFile(path);
-
-                        Console.WriteLine("{0}x{1}", data.Width, data.Height);
-                        Console.WriteLine("Format: {0}", data.Format.ToString());
-
-                        writer.WriteTexture(data);
-                    }
-                }
-            }
-        }
-        else
-        {
-
-        }
-        */
-        /*
-        var convert = true;
-
-        if (convert)
-        {
-            using (var stream = File.Open("test.bin", FileMode.Create))
-            {
-                using (var writer = new BinaryWriter(stream))
-                {
-                    var path = @"M:\Games\gorails\TRAINS\TRAINSET\mdd_2ES4k-123\mdd_2es4ka.s";
-                    var sFile = new SFile(path, false);
-
-                    writer.WriteShape(sFile.shape);
-                }
-            }
-        }
-        else
-        {
-            using (var stream = File.Open("test.bin", FileMode.Open, FileAccess.Read))
-            {
-                using (var reader = new BinaryReader(stream))
-                {
-                    //Console.WriteLine(GC.GetTotalMemory(false) / 1024 / 1024 + " mb");
-                    Thread.Sleep(5000);
-                    //Console.WriteLine("Start");
-                    //var stopwatch = new Stopwatch();
-                    //stopwatch.Start();
-                    {
-                        var model = TestModel.Read(reader);
-
-                        foreach (var item in model.MatricesName)
-                            Console.WriteLine(item);
-                    }
-                    //stopwatch.Stop();
-                    //Console.WriteLine($"Time: {stopwatch.Elapsed.TotalMilliseconds} ms");
-                    Thread.Sleep(5000);
-                    //Console.WriteLine("Collect");
-                    GC.Collect();
-                    Thread.Sleep(5000);
-                    //Console.WriteLine(GC.GetTotalMemory(false) / 1024 / 1024 + " mb");
-                    //Console.WriteLine("Press key");
-                    //Console.ReadKey();
-                }
-            }
-        }
-        */
-
-        /*
-        using (var stream = File.Open("test.bin", FileMode.Create))
-        {
-            using (var writer = new BinaryWriter(stream))
-            {
-                Thread.Sleep(5000);
-                {
-                    var path = @"M:\Games\gorails\TRAINS\TRAINSET\mdd_2ES4k-123\mdd_2es4ka.s";
-                    var sFile = new SFile(path, false);
-                }
-
-                Thread.Sleep(5000);
-
-                GC.Collect();
-
-                Thread.Sleep(5000);
-
-                Console.Write("Press key");
-                Console.ReadKey();
-
-                /*
-                var model = new TestModel();
-
-                model.Matrices = new Matrix4[sFile.shape.matrices.Count];
-                model.MatricesName = new string[sFile.shape.matrices.Count];
-
-                var iMatrix = 0;
-                foreach (var matrix in sFile.shape.matrices)
-                {
-                    model.Matrices[iMatrix] = TKMatrixFromMSTS(matrix);
-                    model.MatricesName[iMatrix] = matrix.Name;
-                    iMatrix++;
-                }
-
-                foreach (var lod_control in sFile.shape.lod_controls)
-                {
-                    model.Lods = new TestModelLod[lod_control.distance_levels.Count];
-
-                    var iLod = 0;
-                    foreach (var distance_level in lod_control.distance_levels)
-                    {
-                        var dist = distance_level.distance_level_header.dlevel_selection;
-                    
-                        var shapeLod = new TestModelLod { Distance = dist, Hierarchy = distance_level.distance_level_header.hierarchy };
-
-                        shapeLod.SubObjects = new TestModelSubObject[distance_level.sub_objects.Count];
-
-                        var iSubObject = 0;
-
-                        foreach (var sub_object in distance_level.sub_objects)
-                        {
-                            var shapeSubObject = new TestModelSubObject { };
-
-                            shapeSubObject.Vertices = new Vertex[sub_object.vertices.Count];
-                            shapeSubObject.Primitives = new TestModelPrimitive[sub_object.primitives.Count];
-
-                            var iVert = 0;
-                            foreach (var vertex in sub_object.vertices)
-                            {
-                                var point = sFile.shape.points[vertex.ipoint];
-                                var normal = sFile.shape.normals[vertex.inormal];
-                                var uv = sFile.shape.uv_points[vertex.vertex_uvs[0]];
-
-                                var vert = new Vertex
-                                {
-                                    Position = new Vector3(point.X, point.Y, point.Z),
-                                    Normal = new Vector3(normal.X, normal.Y, normal.Z),
-                                    TexCoord = new Vector2(uv.U, uv.V)
-                                };
-
-                                shapeSubObject.Vertices[iVert] = vert;
-
-                                iVert++;
-                            }
-
-                            var iPrim = 0;
-
-                            foreach (var primitive in sub_object.primitives)
-                            {
-                                var prim_state = sFile.shape.prim_states[primitive.prim_state_idx];
-                                var vtx_state = sFile.shape.vtx_states[prim_state.ivtx_state];
-                                var light_model_cfg = sFile.shape.light_model_cfgs[vtx_state.LightCfgIdx];
-
-                                var imatrix = vtx_state.imatrix;
-
-                                var shapePrimitive = new TestModelPrimitive { iHierarchy = imatrix };
-
-                                shapePrimitive.Triangles = new ushort[primitive.indexed_trilist.vertex_idxs.Count * 3];
-
-                                var iTrig = 0;
-                                foreach (var vertex_idx in primitive.indexed_trilist.vertex_idxs)
-                                {
-                                    shapePrimitive.Triangles[iTrig * 3 + 0] = (ushort)vertex_idx.a;
-                                    shapePrimitive.Triangles[iTrig * 3 + 1] = (ushort)vertex_idx.b;
-                                    shapePrimitive.Triangles[iTrig * 3 + 2] = (ushort)vertex_idx.c;
-                                    iTrig++;
-                                }
-
-                                var options = SceneryMaterialOptions.None;
-
-                                if (prim_state.alphatestmode == 1)
-                                    options |= SceneryMaterialOptions.AlphaTest;
-
-
-                                if (ShaderNames.ContainsKey(sFile.shape.shader_names[prim_state.ishader]))
-                                    options |= ShaderNames[sFile.shape.shader_names[prim_state.ishader]];
-
-
-                                if (12 + vtx_state.LightMatIdx >= 0 && 12 + vtx_state.LightMatIdx < VertexLightModeMap.Length)
-                                    options |= VertexLightModeMap[12 + vtx_state.LightMatIdx];
-
-                                var image = sFile.shape.images[sFile.shape.textures[prim_state.tex_idxs[0]].iImage];
-
-                                shapePrimitive.Texture = image;
-
-                                shapeSubObject.Primitives[iPrim] = shapePrimitive;
-                                iPrim++;
-                            }
-
-                            shapeLod.SubObjects[iSubObject] = shapeSubObject;
-
-                            iSubObject++;
-                        }
-
-                        model.Lods[iLod] = shapeLod;
-
-                        iLod++;
-                    }
-                }
-
-                model.Write(writer);
-                */
-                /*
-                TestModel model = new TestModel
-                {
-                    Lods = new TestModelLod[]
-                    {
-                        new TestModelLod
-                        {
-                            Distance = 100,
-                            SubObjects = new TestModelSubObject[]
-                            {
-                                new TestModelSubObject
-                                {
-                                    Primitives = new[]
-                                    {
-                                        new TestModelPrimitive
-                                        {
-                                            Texture = "ExampleTexture",
-                                            Triangles = new ushort[]
-                                            {
-                                                1, 2, 3,
-                                                4, 5, 6
-                                            }
-                                        },
-                                        new TestModelPrimitive
-                                        {
-                                            Texture = "ExampleTexture3",
-                                            Triangles = new ushort[]
-                                            {
-                                                9, 1, 4,
-                                                6, 5, 8
-                                            }
-                                        },
-                                    },
-                                    Vertices = new Vertex[]
-                                    {
-                                        new Vertex
-                                        {
-                                            Position = new Vector3 { X = 0, Y = 0, Z = 0},
-                                            Normal = new Vector3 { X = 0, Y = 0, Z = 0},
-                                            TexCoord = new Vector2 { X = 0, Y = 0 },
-                                        },
-                                        new Vertex
-                                        {
-                                            Position = new Vector3 { X = 1, Y = 2, Z = 3},
-                                            Normal = new Vector3 { X = 4, Y = 5, Z = 6},
-                                            TexCoord = new Vector2 { X = 7, Y = 8 },
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-
-                model.Write(writer);
-                
-            }
-        }
-        */
     }
 }

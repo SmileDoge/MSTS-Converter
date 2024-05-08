@@ -128,14 +128,14 @@ namespace MSTS_Converter.Formats
                 if ((size != 1) && (size != 8)) throw new InvalidDataException(string.Format("Unsupported color channel size {0}", size));
                 var type = reader.ReadUInt64();
                 if ((type < 2) || (type > 6)) throw new InvalidDataException(string.Format("Unknown color channel type {0}", type));
-                Console.WriteLine($"Type: {(AceChannelId)type}, Size: {size}");
+                //Console.WriteLine($"Type: {(AceChannelId)type}, Size: {size}");
                 channels.Add(new AceChannel(size, (AceChannelId)type));
             }
 
-            if (channels.Any(c => c.Type == AceChannelId.Alpha))
-                Console.WriteLine($"Alpha: 8 bit");
-            else if (channels.Any(c => c.Type == AceChannelId.Mask))
-                Console.WriteLine($"Alpha: 1 bit");
+            //if (channels.Any(c => c.Type == AceChannelId.Alpha))
+            //    Console.WriteLine($"Alpha: 8 bit");
+            //else if (channels.Any(c => c.Type == AceChannelId.Mask))
+            //    Console.WriteLine($"Alpha: 1 bit");
 
             if ((options & AceFormatOptions.RawData) != 0)
             {
